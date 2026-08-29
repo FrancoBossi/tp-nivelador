@@ -22,8 +22,8 @@ type ClientConfig struct {
 	ServerHost string
 	ServerPort string
 	AgencyId   string
-	InputFile  string
-	OutputFile string
+	InputFile  string //archivo que va a leer el cliente
+	OutputFile string //archivo donde va a escribir la respuesta del servidor
 }
 
 type Client struct {
