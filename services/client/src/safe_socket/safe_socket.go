@@ -5,9 +5,16 @@ import "io"
 //TODO: Complete with a short-read/short-write tolerant implementation
 
 func SendAll(socket io.Writer, bytes []byte) error {
-	_, err := socket.Write(bytes)
-	if err != nil {
-		return err
+	totalSent := 0
+	for totalSent < len(bytes) {
+		n, err := socket.Write(bytes[totalSent:])
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		totalSent += n
 	}
 	return nil
 }
