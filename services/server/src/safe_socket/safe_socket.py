@@ -3,9 +3,14 @@ import socket
 # TODO: Complete with a short-read/short-write tolerant implementation
 
 
-def recv_all(socket: socket.socket, size):
-    return socket.recv(size)
-
+def recv_all(sock: socket.socket, size):
+    buffer = b'' #buffer para guardar los bytes que leeremos y despues devolvemos
+    while len(buffer) < size:
+        chunk = sock.recv(size - len(buffer))
+        if not chunk:
+            raise ConnectionError(f"Conexion cerrada: recibidos {len(buffer)}/{size} bytes")
+        buffer += chunk
+    return buffer
 
 def send_all(sock: socket.socket, data):
     total_sent = 0  #bytes enviados
