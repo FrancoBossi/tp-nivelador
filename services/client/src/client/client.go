@@ -3,8 +3,11 @@ package client
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
+	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
@@ -13,10 +16,6 @@ import (
 
 const CONNECTION_ATTEMPTS_MAX = 3
 const CONNECTION_ATTEMPS_DELAY_MS = 200
-
-const ECHO_CLIENT_BUFFER_SIZE = 512
-const ECHO_CLIENT_MESSAGE_AMOUNT = 3
-const ECHO_CLIENT_MESSAGE_DELAY_MS = 1000
 
 type ClientConfig struct {
 	ServerHost string
@@ -63,8 +62,42 @@ func connectToServer(host, port string) (net.Conn, error) {
 	return conn, err
 }
 
+func sendFrame(conn net.Conn, payload []byte) error {
+	header := bytes.NewBuffer(make([]byte, 0, 4)) //longitud de 4 bytes que definimos en nuestro protocolo
+	binary.Write(header, binary.BigEndian, uint32(len(payload)))
+	if err := safe_socket.SendAll(conn, header.Bytes()); err != nil {
+		return err
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	return safe_socket.SendAll(conn, payload)
+}
+
+func recvFrame(conn net.Conn) ([]byte, error) {
+	header, err := safe_socket.RecvAll(conn, 4)
+	if err != nil {
+		return nil, err
+	}
+	payloadLength := binary.BigEndian.Uint32(header)
+	// Si la longitud del payload es 0, significa que no hay más datos
+	if payloadLength == 0 {
+		return nil, nil
+	}
+	return safe_socket.RecvAll(conn, int(payloadLength))
+}
+
+func serializeBet(config ClientConfig, row string) ([]byte, error) {
+	fields := strings.Split(row, ",")
+	if len(fields) != 5 {
+		return nil, fmt.Errorf("invalid bet row %q", row)
+	}
+	payload := append([]string{config.AgencyId}, fields...)
+	return []byte(strings.Join(payload, ",")), nil
+}
+
 func (client *Client) Run() error {
-	const mainAction = "test-echo-server"
+	const mainAction = "send-bets"
 	defer client.conn.Close()
 
 	inputFile, err := os.Open(client.config.InputFile)
@@ -83,42 +116,52 @@ func (client *Client) Run() error {
 	outputWriter := bufio.NewWriter(outputFile)
 	messageId := 0
 	for scanner.Scan() {
-		clientMessage := scanner.Bytes()
-		if len(clientMessage) == 0 {
+		betRow := strings.TrimSpace(scanner.Text())
+		if betRow == "" {
 			continue
 		}
 
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 		logger.Info(mainAction, logger.InProgress, messageArgs...)
 
-		if err := safe_socket.SendAll(client.conn, clientMessage); err != nil {
-			logger.Error("send-message", logger.Fail, messageArgs...)
-			return err
-		}
-
-		responseBuffer, err := safe_socket.RecvAll(client.conn, ECHO_CLIENT_BUFFER_SIZE)
+		payload, err := serializeBet(client.config, betRow)
 		if err != nil {
-			logger.Error("recv-response", logger.Fail, messageArgs...)
+			logger.Error("serialize-bet", logger.Fail, messageArgs...)
 			return err
 		}
-
-		response := bytes.TrimRight(responseBuffer, "\x00")
-		if _, err := outputWriter.Write(append(response, '\n')); err != nil {
-			logger.Error("write-output-file", logger.Fail, messageArgs...)
+		if err := sendFrame(client.conn, payload); err != nil {
+			logger.Error("send-message", logger.Fail, messageArgs...)
 			return err
 		}
 		messageId++
 	}
-
 	if err := scanner.Err(); err != nil {
 		return err
 	}
 
+	if err := sendFrame(client.conn, []byte("__END__")); err != nil {
+		logger.Error("send-end", logger.Fail, "agency-id", client.config.AgencyId)
+		return err
+	}
+
+	responsePayload, err := recvFrame(client.conn)
+	if err != nil {
+		logger.Error("recv-response", logger.Fail, "agency-id", client.config.AgencyId)
+		return err
+	}
+	if len(responsePayload) > 0 {
+		if responsePayload[len(responsePayload)-1] != '\n' {
+			responsePayload = append(responsePayload, '\n')
+		}
+		if _, err := outputWriter.Write(responsePayload); err != nil {
+			logger.Error("write-output-file", logger.Fail, "agency-id", client.config.AgencyId)
+			return err
+		}
+	}
 	if err := outputWriter.Flush(); err != nil {
 		return err
 	}
 
 	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
-
 	return nil
 }
