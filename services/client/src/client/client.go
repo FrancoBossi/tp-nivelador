@@ -23,6 +23,7 @@ type ClientConfig struct {
 	AgencyId   string
 	InputFile  string //archivo que va a leer el cliente
 	OutputFile string //archivo donde va a escribir la respuesta del servidor
+	BatchSize  int    //cantidad de apuestas que va a enviar en cada mensaje
 }
 
 type Client struct {
