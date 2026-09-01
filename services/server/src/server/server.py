@@ -38,18 +38,34 @@ class Server:
             f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
         )
 
-    def _deserialize_bet(self, payload: bytes) -> Bet:
-        decoded = payload.decode("utf-8")
-        first_name, last_name, document, birthdate, number = decoded.split(",")[1:]
-        agency_id = int(decoded.split(",")[0])
+    def _deserialize_bet(self, payload: bytes | str) -> Bet:
+        decoded = payload.decode("utf-8") if isinstance(payload, bytes) else payload
+        fields = decoded.split(",")
+        if len(fields) != 6:
+            raise ValueError(f"Invalid bet payload: {decoded!r}")
+
+        agency_id, first_name, last_name, document, birthdate, number = fields
         return Bet(
-            agency_id=agency_id,
+            agency_id=int(agency_id),
             first_name=first_name,
             last_name=last_name,
             document=int(document),
             birthdate=birthdate,
             number=int(number),
         )
+
+    def _deserialize_batch(self, payload: bytes) -> list[Bet]:
+        if not payload:
+            return []
+
+        decoded = payload.decode("utf-8")
+        bets = []
+        for line in decoded.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            bets.append(self._deserialize_bet(line))
+        return bets
 
     def _handle_client(self, client_socket):
         action = "handle-client"
@@ -65,11 +81,11 @@ class Server:
                 if client_message == b"__END__":
                     break
 
-                bet = self._deserialize_bet(client_message)
-                if agency_id is None:
-                    agency_id = bet.agency_id
-                bets.append(bet)
-                message_amount += 1
+                batch_bets = self._deserialize_batch(client_message)
+                if agency_id is None and batch_bets:
+                    agency_id = batch_bets[0].agency_id
+                bets.extend(batch_bets)
+                message_amount += len(batch_bets)
 
             if agency_id is None:
                 logger.info(
