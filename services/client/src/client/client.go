@@ -96,6 +96,43 @@ func serializeBet(config ClientConfig, row string) ([]byte, error) {
 	return []byte(strings.Join(payload, ",")), nil
 }
 
+func serializeBatch(config ClientConfig, rows []string) ([]byte, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	payloadRows := make([]string, 0, len(rows))
+	for _, row := range rows {
+		betPayload, err := serializeBet(config, row)
+		if err != nil {
+			return nil, err
+		}
+		payloadRows = append(payloadRows, string(betPayload))
+	}
+	return []byte(strings.Join(payloadRows, "\n")), nil
+}
+
+func (client *Client) sendBatch(batch []string, messageId int) error {
+	const mainAction = "send-bets"
+	if len(batch) == 0 {
+		return nil
+	}
+
+	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batch-size", len(batch)}
+	logger.Info(mainAction, logger.InProgress, messageArgs...)
+
+	payload, err := serializeBatch(client.config, batch)
+	if err != nil {
+		logger.Error("serialize-batch", logger.Fail, messageArgs...)
+		return err
+	}
+	if err := sendFrame(client.conn, payload); err != nil {
+		logger.Error("send-message", logger.Fail, messageArgs...)
+		return err
+	}
+	return nil
+}
+
 func (client *Client) Run() error {
 	const mainAction = "send-bets"
 	defer client.conn.Close()
