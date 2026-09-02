@@ -114,3 +114,23 @@ El protocolo de comunicación se mantiene igual:
 - **Servidor → Cliente**: Una única trama con ganadores (solo los de esa agencia)
 
 La novedad es que el servidor **no responde inmediatamente**: espera a que lleguen suficientes agencias antes de computar ganadores.
+
+## Informe del ejercicio 8
+
+El cierre graceful comienza al recibir `SIGTERM` (o `SIGINT` para facilitar la ejecución local) y no intercambia mensajes adicionales con el otro proceso.
+
+### Cliente
+
+`signal.NotifyContext` cancela el contexto de ejecución. La cancelación cierra el socket para interrumpir inmediatamente cualquier lectura o escritura bloqueada. Al finalizar `Run`, se cierran el archivo de entrada, el archivo de salida y la goroutine encargada de cerrar la conexión.
+
+### Servidor
+
+El handler de señales:
+
+- marca el evento de apagado;
+- despierta las agencias bloqueadas en la condición de quórum;
+- cierra el socket de escucha y todos los sockets de clientes activos.
+
+El hilo principal espera al hilo aceptador y a todos los threads de clientes antes de terminar. Los sockets se cierran también mediante `finally` y context managers, por lo que no quedan descriptores abiertos. Las apuestas parciales de una ronda se descartan al apagar el servidor, evitando ejecutar un sorteo durante el cierre.
+
+El proceso no espera sleeps ni realiza un protocolo de despedida: libera los recursos tan pronto como recibe `SIGTERM`, dentro del tiempo acotado por Docker.
