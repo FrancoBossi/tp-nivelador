@@ -2,9 +2,10 @@ package client
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/binary"
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -63,10 +64,25 @@ func connectToServer(host, port string) (net.Conn, error) {
 	return conn, err
 }
 
+func uint32ToBytes(val uint32) []byte {
+	return []byte{
+		byte((val >> 24) & 0xFF),
+		byte((val >> 16) & 0xFF),
+		byte((val >> 8) & 0xFF),
+		byte(val & 0xFF),
+	}
+}
+
+func bytesToUint32(b []byte) uint32 {
+	return (uint32(b[0]) << 24) |
+		(uint32(b[1]) << 16) |
+		(uint32(b[2]) << 8) |
+		uint32(b[3])
+}
+
 func sendFrame(conn net.Conn, payload []byte) error {
-	header := bytes.NewBuffer(make([]byte, 0, 4)) //longitud de 4 bytes que definimos en nuestro protocolo
-	binary.Write(header, binary.BigEndian, uint32(len(payload)))
-	if err := safe_socket.SendAll(conn, header.Bytes()); err != nil {
+	header := uint32ToBytes(uint32(len(payload)))
+	if err := safe_socket.SendAll(conn, header); err != nil {
 		return err
 	}
 	if len(payload) == 0 {
@@ -80,8 +96,7 @@ func recvFrame(conn net.Conn) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	payloadLength := binary.BigEndian.Uint32(header)
-	// Si la longitud del payload es 0, significa que no hay más datos
+	payloadLength := bytesToUint32(header)
 	if payloadLength == 0 {
 		return nil, nil
 	}
@@ -102,15 +117,18 @@ func serializeBatch(config ClientConfig, rows []string) ([]byte, error) {
 		return nil, nil
 	}
 
-	payloadRows := make([]string, 0, len(rows))
-	for _, row := range rows {
+	var builder strings.Builder
+	for i, row := range rows {
 		betPayload, err := serializeBet(config, row)
 		if err != nil {
 			return nil, err
 		}
-		payloadRows = append(payloadRows, string(betPayload))
+		if i > 0 {
+			builder.WriteByte('\n')
+		}
+		builder.Write(betPayload)
 	}
-	return []byte(strings.Join(payloadRows, "\n")), nil
+	return []byte(builder.String()), nil
 }
 
 func (client *Client) sendBatch(batch []string, messageId int) error {
@@ -134,9 +152,18 @@ func (client *Client) sendBatch(batch []string, messageId int) error {
 	return nil
 }
 
-func (client *Client) Run() error {
+func (client *Client) Run(ctx context.Context) error {
 	const mainAction = "send-bets"
 	defer client.conn.Close()
+
+	go func() {
+		<-ctx.Done()
+		_ = client.conn.Close()
+	}()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	inputFile, err := os.Open(client.config.InputFile)
 	if err != nil {
@@ -150,30 +177,57 @@ func (client *Client) Run() error {
 	}
 	defer outputFile.Close()
 
-	scanner := bufio.NewScanner(inputFile)
+	reader := bufio.NewReader(inputFile)
 	outputWriter := bufio.NewWriter(outputFile)
 	messageId := 0
-	for scanner.Scan() {
-		betRow := strings.TrimSpace(scanner.Text())
-		if betRow == "" {
-			continue
+	batch := make([]string, 0, client.config.BatchSize)
+
+	flushBatch := func() error {
+		if len(batch) == 0 {
+			return nil
 		}
 
-		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
+		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batch-size", len(batch)}
 		logger.Info(mainAction, logger.InProgress, messageArgs...)
 
-		payload, err := serializeBet(client.config, betRow)
+		payload, err := serializeBatch(client.config, batch)
 		if err != nil {
-			logger.Error("serialize-bet", logger.Fail, messageArgs...)
+			logger.Error("serialize-batch", logger.Fail, messageArgs...)
 			return err
 		}
 		if err := sendFrame(client.conn, payload); err != nil {
 			logger.Error("send-message", logger.Fail, messageArgs...)
 			return err
 		}
+		batch = batch[:0]
 		messageId++
+		return nil
 	}
-	if err := scanner.Err(); err != nil {
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		if line != "" {
+			betRow := strings.TrimSpace(line)
+			if betRow != "" {
+				batch = append(batch, betRow)
+				if len(batch) >= client.config.BatchSize {
+					if err := flushBatch(); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+	}
+	if err := flushBatch(); err != nil {
 		return err
 	}
 
@@ -184,6 +238,9 @@ func (client *Client) Run() error {
 
 	responsePayload, err := recvFrame(client.conn)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		logger.Error("recv-response", logger.Fail, "agency-id", client.config.AgencyId)
 		return err
 	}

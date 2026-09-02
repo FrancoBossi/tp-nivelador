@@ -1,13 +1,22 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
+	"os/signal"
+	"runtime/debug"
 	"strconv"
+	"syscall"
 
 	client "github.com/7574-sistemas-distribuidos/tp-nivelador/src/client"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 )
+
+func init() {
+	debug.SetGCPercent(20)
+	_ = debug.SetMemoryLimit(64 << 20)
+}
 
 func loadConfig() (client.ClientConfig, error) {
 	agencyId := os.Getenv("AGENCY_ID")
@@ -61,13 +70,20 @@ func run() int {
 		return 1
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	client, err := client.NewClient(config)
 	if err != nil {
 		logger.Error("client-new", logger.Fail, "err", err)
 		return 1
 	}
 
-	if err := client.Run(); err != nil {
+	if err := client.Run(ctx); err != nil {
+		if ctx.Err() != nil {
+			logger.Info("client-run", logger.Success, "agency-id", config.AgencyId)
+			return 0
+		}
 		logger.Error("client-run", logger.Fail, "err", err)
 		return 1
 	}
