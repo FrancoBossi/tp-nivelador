@@ -131,37 +131,23 @@ func serializeBatch(config ClientConfig, rows []string) ([]byte, error) {
 	return []byte(builder.String()), nil
 }
 
-func (client *Client) sendBatch(batch []string, messageId int) error {
-	const mainAction = "send-bets"
-	if len(batch) == 0 {
-		return nil
-	}
-
-	messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batch-size", len(batch)}
-	logger.Info(mainAction, logger.InProgress, messageArgs...)
-
-	payload, err := serializeBatch(client.config, batch)
-	if err != nil {
-		logger.Error("serialize-batch", logger.Fail, messageArgs...)
-		return err
-	}
-	if err := sendFrame(client.conn, payload); err != nil {
-		logger.Error("send-message", logger.Fail, messageArgs...)
-		return err
-	}
-	return nil
-}
-
 func (client *Client) Run(ctx context.Context) error {
 	const mainAction = "send-bets"
 	defer client.conn.Close()
 
+	runCtx, cancel := context.WithCancel(ctx)
+	shutdownDone := make(chan struct{})
 	go func() {
-		<-ctx.Done()
+		defer close(shutdownDone)
+		<-runCtx.Done()
 		_ = client.conn.Close()
 	}()
+	defer func() {
+		cancel()
+		<-shutdownDone
+	}()
 
-	if err := ctx.Err(); err != nil {
+	if err := runCtx.Err(); err != nil {
 		return err
 	}
 
@@ -205,7 +191,7 @@ func (client *Client) Run(ctx context.Context) error {
 	}
 
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := runCtx.Err(); err != nil {
 			return err
 		}
 		line, err := reader.ReadString('\n')
@@ -238,8 +224,8 @@ func (client *Client) Run(ctx context.Context) error {
 
 	responsePayload, err := recvFrame(client.conn)
 	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if runCtx.Err() != nil {
+			return runCtx.Err()
 		}
 		logger.Error("recv-response", logger.Fail, "agency-id", client.config.AgencyId)
 		return err

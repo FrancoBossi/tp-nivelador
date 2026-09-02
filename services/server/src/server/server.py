@@ -48,27 +48,40 @@ class Server:
         self.server_socket = None
         self.shutdown_event = threading.Event()
         self.active_client_sockets = set()
+        self.client_threads = set()
+        self.client_threads_lock = threading.Lock()
         self.lottery_lock = threading.Lock()
         self.round_lock = threading.Condition()
         self.round_bets = {}
         self.round_results = {}
+        self.shutdown_lock = threading.Lock()
+        self.accept_thread = None
         self.agency_quorum_min = max(1, int(os.getenv("AGENCY_QUORUM_MIN", "1")))
         signal.signal(signal.SIGTERM, self._handle_shutdown_signal)
         signal.signal(signal.SIGINT, self._handle_shutdown_signal)
 
     def _handle_shutdown_signal(self, signum, frame):
-        self.shutdown_event.set()
-        if self.server_socket is not None:
-            try:
-                self.server_socket.close()
-            except OSError:
-                pass
-        for client_socket in list(self.active_client_sockets):
-            try:
-                client_socket.close()
-            except OSError:
-                pass
-            self.active_client_sockets.discard(client_socket)
+        self.shutdown()
+
+    def shutdown(self):
+        with self.shutdown_lock:
+            if self.shutdown_event.is_set():
+                return
+            self.shutdown_event.set()
+            with self.round_lock:
+                self.round_bets.clear()
+                self.round_results.clear()
+                self.round_lock.notify_all()
+            if self.server_socket is not None:
+                try:
+                    self.server_socket.close()
+                except OSError:
+                    pass
+            for client_socket in list(self.active_client_sockets):
+                try:
+                    client_socket.close()
+                except OSError:
+                    pass
 
     def _serialize_winner(self, bet: Bet) -> str:
         return (
@@ -135,6 +148,8 @@ class Server:
             if len(self.round_bets) < self.agency_quorum_min:
                 while agency_id not in self.round_results and agency_id in self.round_bets:
                     self.round_lock.wait()
+                if self.shutdown_event.is_set():
+                    raise ConnectionError("Server shutting down")
                 response = self.round_results.pop(agency_id, [])
                 return response
 
@@ -144,6 +159,8 @@ class Server:
             for resolved_agency_id, winners in winners_by_agency.items():
                 self.round_results[resolved_agency_id] = winners
             self.round_lock.notify_all()
+            if self.shutdown_event.is_set():
+                raise ConnectionError("Server shutting down")
             response = self.round_results.pop(agency_id, [])
             return response
 
@@ -152,7 +169,8 @@ class Server:
         message_amount = 0
         agency_id = None
         bets = []
-        self.active_client_sockets.add(client_socket)
+        with self.client_threads_lock:
+            self.active_client_sockets.add(client_socket)
         try:
             logger.info(action, logger.LogResult.in_progress)
             while True:
@@ -203,8 +221,11 @@ class Server:
             if not self.shutdown_event.is_set():
                 raise exc
         finally:
-            self.active_client_sockets.discard(client_socket)
+            with self.client_threads_lock:
+                self.active_client_sockets.discard(client_socket)
             client_socket.close()
+            with self.client_threads_lock:
+                self.client_threads.discard(threading.current_thread())
 
     def _accept_loop(self):
         action = "accept-connection"
@@ -212,24 +233,39 @@ class Server:
             self.server_socket = server_socket
             server_socket.bind((self.server_host, self.server_port))
             server_socket.listen()
+            server_socket.settimeout(0.5)
             while not self.shutdown_event.is_set():
                 try:
                     logger.info(action, logger.LogResult.in_progress)
                     client_socket, _ = server_socket.accept()
+                except socket.timeout:
+                    continue
                 except OSError:
                     if self.shutdown_event.is_set():
                         break
                     logger.error(action, logger.LogResult.fail)
                     raise
+                if self.shutdown_event.is_set():
+                    client_socket.close()
+                    break
                 logger.info(action, logger.LogResult.success)
-                threading.Thread(
+                client_thread = threading.Thread(
                     target=self._handle_client,
                     args=(client_socket,),
-                    daemon=True,
-                ).start()
+                )
+                with self.client_threads_lock:
+                    self.client_threads.add(client_thread)
+                client_thread.start()
 
     def run(self):
-        accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
-        accept_thread.start()
-        while not self.shutdown_event.is_set():
-            threading.Event().wait(1)
+        self.accept_thread = threading.Thread(target=self._accept_loop)
+        self.accept_thread.start()
+        try:
+            self.shutdown_event.wait()
+        finally:
+            self.shutdown()
+            self.accept_thread.join()
+            with self.client_threads_lock:
+                client_threads = list(self.client_threads)
+            for client_thread in client_threads:
+                client_thread.join()
