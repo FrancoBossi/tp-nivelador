@@ -35,3 +35,82 @@ La serialización del cliente ya no envía una apuesta por trama: en cambio, acu
 Luego del último lote, el cliente envía el mensaje `__END__` para indicar que la transmisión terminó. El servidor, por su parte, recibe cada trama y la deserializa como un batch. Cada línea del payload se interpreta como una apuesta individual; si el lote llega bien formado, se procesa completo y se agrega al almacenamiento. Si alguna línea es inválida, la conexión se corta con error y no se deja un estado parcial de ese lote.
 
 Esta estrategia conserva la consistencia del protocolo y asegura que la respuesta del servidor se devuelve solo cuando el lote completo es válido. La carga de apuestas se mantiene a nivel de dominio, mientras que la capa de comunicación se encarga exclusivamente del empaquetado y desempaquetado del batch.
+
+
+## Informe del ejercicio 7
+
+## Concurrencia y Sincronización de Rondas de Sorteo
+
+### Concepto General
+
+El ejercicio 7 introduce el problema de **múltiples agencias conectándose simultáneamente** al servidor. Para garantizar que se realiza un sorteo justo e íntegro, el servidor debe:
+
+1. **Esperar un quórum mínimo** de agencias antes de ejecutar un sorteo
+2. **Ejecutar el sorteo de forma atómica** cuando se alcanza el quórum
+3. **Distribuir resultados scoped**: cada agencia recibe **SOLO los ganadores de sus propias apuestas**, no de todas
+4. **Permitir rondas múltiples** sin reiniciar el servidor
+
+### Implementación: Sistema de Rondas
+
+El servidor implementa un **modelo de rondas de sorteo** usando sincronización con `threading.Condition`:
+
+#### Estructura de datos:
+```python
+self.round_bets = {}           # {agency_id: [Bets]}
+self.round_results = {}        # {agency_id: [winners]}
+self.agency_quorum_min = int   # Variable de entorno
+self.round_lock = threading.Condition()
+```
+
+#### Flujo de una ronda:
+
+1. **Fase de acumulación**: Cuando una agencia se conecta:
+   - Se añaden sus apuestas a `round_bets[agency_id]`
+   - Si `len(round_bets) < agency_quorum_min`: el thread espera con `round_lock.wait()`
+
+2. **Fase de disparo**: Cuando se alcanza el quórum:
+   - Se captura un snapshot de `round_bets`
+   - Se limpian los datos para la próxima ronda: `round_bets.clear()`
+   - Se ejecuta `_compute_round_winners(snapshot)` que:
+     - Almacena todas las apuestas en la BD con `Lottery.store_bets()`
+     - Calcula ganadores filtrando por agency_id
+     - Cada agencia recibe SOLO sus ganadores (constraint clave)
+
+3. **Fase de distribución**: Los resultados se distribuyen:
+   - Se colocan en `round_results[agency_id]`
+   - Se notifica a todos los threads esperando: `round_lock.notify_all()`
+   - Cada thread recibe su respuesta específica
+
+4. **Fase de limpieza**: Los resultados se consumen:
+   - `response = round_results.pop(agency_id)`
+   - El thread retorna la respuesta al cliente
+
+#### Garantías de seguridad:
+
+- **Atomicidad del sorteo**: El bloque `with self.round_lock` garantiza que la transición de acumulación a cómputo es indivisible
+- **No hay broadcast**: Solo los ganadores que pertenecen al `agency_id` de la agencia se devuelven
+- **Rondas independientes**: Cada ronda es un ciclo completo sin interferencias
+- **No hay deadlock**: El condition variable se usa correctamente: espera dentro del lock y notificación antes de liberar
+
+### Concurrencia a nivel de threads
+
+El servidor implementa **un thread por cliente**:
+```python
+threading.Thread(
+    target=self._handle_client,
+    args=(client_socket,),
+    daemon=True,
+).start()
+```
+
+Todos los threads comparten:
+- `lottery_lock` (mutex): protege accesos a `Lottery.store_bets()` y `Lottery.load_bets()`
+- `round_lock` (condition variable): coordina el sincronismo entre agencias
+
+### Comunicación
+
+El protocolo de comunicación se mantiene igual:
+- **Cliente → Servidor**: Tramas con batches de apuestas + `__END__`
+- **Servidor → Cliente**: Una única trama con ganadores (solo los de esa agencia)
+
+La novedad es que el servidor **no responde inmediatamente**: espera a que lleguen suficientes agencias antes de computar ganadores.
