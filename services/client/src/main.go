@@ -5,12 +5,31 @@ import (
 	"errors"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 
 	client "github.com/7574-sistemas-distribuidos/tp-nivelador/src/client"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 )
+
+// funcion para parcear el BATCH_SIZE de string a int
+func parsePositiveInt(value string) (int, error) {
+	if value == "" {
+		return 0, errors.New("empty value")
+	}
+
+	result := 0
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, errors.New("invalid character in number")
+		}
+		result = result*10 + int(char-'0')
+	}
+
+	if result <= 0 {
+		return 0, errors.New("value must be positive")
+	}
+	return result, nil
+}
 
 func loadConfig() (client.ClientConfig, error) {
 	agencyId := os.Getenv("AGENCY_ID")
@@ -40,8 +59,8 @@ func loadConfig() (client.ClientConfig, error) {
 
 	batchSize := 1
 	if batchSizeRaw := os.Getenv("BATCH_SIZE"); batchSizeRaw != "" {
-		parsedBatchSize, err := strconv.Atoi(batchSizeRaw)
-		if err != nil || parsedBatchSize <= 0 {
+		parsedBatchSize, err := parsePositiveInt(batchSizeRaw)
+		if err != nil {
 			return client.ClientConfig{}, errors.New("BATCH_SIZE environment variable must be a positive integer")
 		}
 		batchSize = parsedBatchSize
