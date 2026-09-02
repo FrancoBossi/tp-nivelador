@@ -5,18 +5,12 @@ import (
 	"errors"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"strconv"
 	"syscall"
 
 	client "github.com/7574-sistemas-distribuidos/tp-nivelador/src/client"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 )
-
-func init() {
-	debug.SetGCPercent(20)
-	_ = debug.SetMemoryLimit(64 << 20)
-}
 
 func loadConfig() (client.ClientConfig, error) {
 	agencyId := os.Getenv("AGENCY_ID")
