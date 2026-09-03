@@ -11,9 +11,10 @@ func SendAll(socket io.Writer, bytes []byte) error {
 		if err != nil {
 			return err
 		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
+		// Nota: un Writer puede legítimamente devolver n == 0 sin error
+		// (I/O no garantiza progreso en una sola llamada), por eso NO se
+		// trata como un error fatal: simplemente se reintenta hasta
+		// completar el envío.
 		totalSent += n
 	}
 	return nil
@@ -24,13 +25,16 @@ func RecvAll(socket io.Reader, size int) ([]byte, error) {
 	totalRead := 0
 	for totalRead < size {
 		n, err := socket.Read(buff[totalRead:])
+		totalRead += n
+		if totalRead == size {
+			return buff[:totalRead], nil
+		}
 		if err != nil {
 			return nil, err
 		}
 		if n == 0 {
 			return nil, io.ErrUnexpectedEOF
 		}
-		totalRead += n
 	}
 	return buff[:totalRead], nil
 }
