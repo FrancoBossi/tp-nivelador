@@ -4,15 +4,14 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"os"
 	"strings"
 	"time"
 
+	protocol "github.com/7574-sistemas-distribuidos/tp-nivelador/src/cliente-protocolo"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
-	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
 )
 
 const CONNECTION_ATTEMPTS_MAX = 3
@@ -63,70 +62,6 @@ func connectToServer(host, port string) (net.Conn, error) {
 	return conn, err
 }
 
-func uint32ToBytes(val uint32) []byte {
-	return []byte{
-		byte((val >> 24) & 0xFF),
-		byte((val >> 16) & 0xFF),
-		byte((val >> 8) & 0xFF),
-		byte(val & 0xFF),
-	}
-}
-
-func bytesToUint32(b []byte) uint32 {
-	return (uint32(b[0]) << 24) |
-		(uint32(b[1]) << 16) |
-		(uint32(b[2]) << 8) |
-		uint32(b[3])
-}
-
-func sendFrame(conn net.Conn, payload []byte) error {
-	header := uint32ToBytes(uint32(len(payload)))
-	frame := make([]byte, 0, len(header)+len(payload))
-	frame = append(frame, header...)
-	frame = append(frame, payload...)
-	return safe_socket.SendAll(conn, frame)
-}
-
-func recvFrame(conn net.Conn) ([]byte, error) {
-	header, err := safe_socket.RecvAll(conn, 4)
-	if err != nil {
-		return nil, err
-	}
-	payloadLength := bytesToUint32(header)
-	if payloadLength == 0 {
-		return nil, nil
-	}
-	return safe_socket.RecvAll(conn, int(payloadLength))
-}
-
-func serializeBet(config ClientConfig, row string) ([]byte, error) {
-	fields := strings.Split(row, ",")
-	if len(fields) != 5 {
-		return nil, fmt.Errorf("invalid bet row %q", row)
-	}
-	payload := append([]string{config.AgencyId}, fields...)
-	return []byte(strings.Join(payload, ",")), nil
-}
-
-func serializeBatch(config ClientConfig, rows []string) ([]byte, error) {
-	if len(rows) == 0 {
-		return nil, nil
-	}
-
-	var builder strings.Builder
-	for i, row := range rows {
-		betPayload, err := serializeBet(config, row)
-		if err != nil {
-			return nil, err
-		}
-		if i > 0 {
-			builder.WriteByte('\n')
-		}
-		builder.Write(betPayload)
-	}
-	return []byte(builder.String()), nil
-}
-
 func (client *Client) Run(ctx context.Context) error {
 	const mainAction = "send-bets"
 	defer client.conn.Close()
@@ -172,16 +107,16 @@ func (client *Client) Run(ctx context.Context) error {
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batch-size", len(batch)}
 		logger.Info(mainAction, logger.InProgress, messageArgs...)
 
-		payload, err := serializeBatch(client.config, batch)
+		payload, err := protocol.SerializeBatch(client.config.AgencyId, batch)
 		if err != nil {
 			logger.Error("serialize-batch", logger.Fail, messageArgs...)
 			return err
 		}
-		if err := sendFrame(client.conn, payload); err != nil {
+		if err := protocol.SendFrame(client.conn, payload); err != nil {
 			logger.Error("send-message", logger.Fail, messageArgs...)
 			return err
 		}
-		if _, err := recvFrame(client.conn); err != nil {
+		if _, err := protocol.ReceiveFrame(client.conn); err != nil {
 			logger.Error("recv-batch-ack", logger.Fail, messageArgs...)
 			return err
 		}
@@ -217,12 +152,12 @@ func (client *Client) Run(ctx context.Context) error {
 		return err
 	}
 
-	if err := sendFrame(client.conn, []byte("__END__")); err != nil {
+	if err := protocol.SendFrame(client.conn, []byte("__END__")); err != nil {
 		logger.Error("send-end", logger.Fail, "agency-id", client.config.AgencyId)
 		return err
 	}
 
-	responsePayload, err := recvFrame(client.conn)
+	responsePayload, err := protocol.ReceiveFrame(client.conn)
 	if err != nil {
 		if runCtx.Err() != nil {
 			return runCtx.Err()

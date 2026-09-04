@@ -2,43 +2,25 @@ import os
 import signal
 import socket
 import threading
+import importlib
 
 import logger
-import safe_socket
 from lottery import Bet, Lottery
+
+protocol = importlib.import_module("server-protocolo.protocol")
 
 _LOTTERY_STORAGE_PATH = "/tmp/lottery.csv"
 
 
-def uint32_to_bytes(val: int) -> bytes:
-    return bytes([
-        (val >> 24) & 0xFF,
-        (val >> 16) & 0xFF,
-        (val >> 8) & 0xFF,
-        val & 0xFF,
-    ])
-
-
-def bytes_to_uint32(b: bytes) -> int:
-    return (int(b[0]) << 24) | (int(b[1]) << 16) | (int(b[2]) << 8) | int(b[3])
-
-
 def _recv_message(sock):
     try:
-        header = safe_socket.recv_all(sock, 4)
+        return protocol.receive_frame(sock)
     except (ConnectionError, OSError):
         return None
-    if not header:
-        return None
-    payload_length = bytes_to_uint32(header)
-    if payload_length == 0:
-        return b""
-    return safe_socket.recv_all(sock, payload_length)
 
 
 def _send_message(sock, payload: bytes):
-    header = uint32_to_bytes(len(payload))
-    safe_socket.send_all(sock, header + payload)
+    protocol.send_frame(sock, payload)
 
 
 class Server:
@@ -83,17 +65,7 @@ class Server:
                 except OSError:
                     pass
 
-    def _serialize_winner(self, bet: Bet) -> str:
-        return (
-            f"{bet.first_name},{bet.last_name},{bet.document},{bet.birthdate},{bet.number}"
-        )
-
-    def _deserialize_bet(self, payload: bytes | str) -> Bet:
-        decoded = payload.decode("utf-8") if isinstance(payload, bytes) else payload
-        fields = decoded.split(",")
-        if len(fields) != 6:
-            raise ValueError(f"Invalid bet payload: {decoded!r}")
-
+    def _deserialize_bet(self, fields: tuple[str, str, str, str, str, str]) -> Bet:
         agency_id, first_name, last_name, document, birthdate, number = fields
         return Bet(
             agency_id=int(agency_id),
@@ -103,19 +75,6 @@ class Server:
             birthdate=birthdate,
             number=int(number),
         )
-
-    def _deserialize_batch(self, payload: bytes) -> list[Bet]:
-        if not payload:
-            return []
-
-        decoded = payload.decode("utf-8")
-        bets = []
-        for line in decoded.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            bets.append(self._deserialize_bet(line))
-        return bets
 
     def _compute_round_winners(self, round_bets: dict[int, list[Bet]]) -> dict[int, list[str]]:
         winners_by_agency = {}
@@ -133,7 +92,14 @@ class Server:
 
         for agency_id, agency_bets in round_bets.items():
             winners_by_agency[agency_id] = [
-                self._serialize_winner(bet)
+                protocol.serialize_winner((
+                    str(bet.agency_id),
+                    bet.first_name,
+                    bet.last_name,
+                    str(bet.document),
+                    bet.birthdate,
+                    str(bet.number),
+                ))
                 for bet in persisted
                 if bet.agency_id == agency_id and Lottery(storage_path=_LOTTERY_STORAGE_PATH).has_won(bet)
             ]
@@ -180,7 +146,10 @@ class Server:
                 if client_message == b"__END__":
                     break
 
-                batch_bets = self._deserialize_batch(client_message)
+                batch_bets = [
+                    self._deserialize_bet(fields)
+                    for fields in protocol.deserialize_batch(client_message)
+                ]
                 if agency_id is None and batch_bets:
                     agency_id = batch_bets[0].agency_id
                 bets.extend(batch_bets)
