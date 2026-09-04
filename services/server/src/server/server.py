@@ -185,6 +185,7 @@ class Server:
                     agency_id = batch_bets[0].agency_id
                 bets.extend(batch_bets)
                 message_amount += len(batch_bets)
+                _send_message(client_socket, b"")
 
             if agency_id is None:
                 logger.info(

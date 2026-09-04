@@ -56,7 +56,6 @@ func connectToServer(host, port string) (net.Conn, error) {
 			time.Sleep(CONNECTION_ATTEMPS_DELAY_MS * time.Millisecond)
 			continue
 		}
-
 		logger.Info(action, logger.Success)
 		break
 	}
@@ -82,13 +81,10 @@ func bytesToUint32(b []byte) uint32 {
 
 func sendFrame(conn net.Conn, payload []byte) error {
 	header := uint32ToBytes(uint32(len(payload)))
-	if err := safe_socket.SendAll(conn, header); err != nil {
-		return err
-	}
-	if len(payload) == 0 {
-		return nil
-	}
-	return safe_socket.SendAll(conn, payload)
+	frame := make([]byte, 0, len(header)+len(payload))
+	frame = append(frame, header...)
+	frame = append(frame, payload...)
+	return safe_socket.SendAll(conn, frame)
 }
 
 func recvFrame(conn net.Conn) ([]byte, error) {
@@ -183,6 +179,10 @@ func (client *Client) Run(ctx context.Context) error {
 		}
 		if err := sendFrame(client.conn, payload); err != nil {
 			logger.Error("send-message", logger.Fail, messageArgs...)
+			return err
+		}
+		if _, err := recvFrame(client.conn); err != nil {
+			logger.Error("recv-batch-ack", logger.Fail, messageArgs...)
 			return err
 		}
 		batch = batch[:0]
