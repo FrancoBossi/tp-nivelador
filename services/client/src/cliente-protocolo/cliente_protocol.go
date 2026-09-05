@@ -1,4 +1,4 @@
-package protocol
+package cliente_protocol
 
 import (
 	"fmt"

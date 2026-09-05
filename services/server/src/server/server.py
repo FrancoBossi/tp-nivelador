@@ -7,7 +7,7 @@ import importlib
 import logger
 from lottery import Bet, Lottery
 
-protocol = importlib.import_module("server-protocolo.protocol")
+protocol = importlib.import_module("server-protocolo.server_protocol")
 
 _LOTTERY_STORAGE_PATH = "/tmp/lottery.csv"
 

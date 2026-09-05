@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	protocol "github.com/7574-sistemas-distribuidos/tp-nivelador/src/cliente-protocolo"
+	cliente_protocol "github.com/7574-sistemas-distribuidos/tp-nivelador/src/cliente-protocolo"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 )
 
@@ -107,16 +107,16 @@ func (client *Client) Run(ctx context.Context) error {
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batch-size", len(batch)}
 		logger.Info(mainAction, logger.InProgress, messageArgs...)
 
-		payload, err := protocol.SerializeBatch(client.config.AgencyId, batch)
+		payload, err := cliente_protocol.SerializeBatch(client.config.AgencyId, batch)
 		if err != nil {
 			logger.Error("serialize-batch", logger.Fail, messageArgs...)
 			return err
 		}
-		if err := protocol.SendFrame(client.conn, payload); err != nil {
+		if err := cliente_protocol.SendFrame(client.conn, payload); err != nil {
 			logger.Error("send-message", logger.Fail, messageArgs...)
 			return err
 		}
-		if _, err := protocol.ReceiveFrame(client.conn); err != nil {
+		if _, err := cliente_protocol.ReceiveFrame(client.conn); err != nil {
 			logger.Error("recv-batch-ack", logger.Fail, messageArgs...)
 			return err
 		}
@@ -152,12 +152,12 @@ func (client *Client) Run(ctx context.Context) error {
 		return err
 	}
 
-	if err := protocol.SendFrame(client.conn, []byte("__END__")); err != nil {
+	if err := cliente_protocol.SendFrame(client.conn, []byte("__END__")); err != nil {
 		logger.Error("send-end", logger.Fail, "agency-id", client.config.AgencyId)
 		return err
 	}
 
-	responsePayload, err := protocol.ReceiveFrame(client.conn)
+	responsePayload, err := cliente_protocol.ReceiveFrame(client.conn)
 	if err != nil {
 		if runCtx.Err() != nil {
 			return runCtx.Err()
